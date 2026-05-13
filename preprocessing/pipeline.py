@@ -5,6 +5,8 @@ from steps.lowercasing import lowercase
 from steps.tokenization import tokenize
 #from steps.tokenization_spacy import tokenize
 from steps.punctuation import remove_punctuation
+from steps.stopwords import remove_stopwords
+
 
 
 
@@ -46,5 +48,13 @@ print("AFTER: ", df['cleaned'][1][:10])
 print("\n=== PUNCTUATION REMOVAL ===")
 print("BEFORE:", df['cleaned'][1][:10])
 df['cleaned'] = df['cleaned'].apply(remove_punctuation)
+print("AFTER: ", df['cleaned'][1][:10])
+
+
+
+# ── STOP WORD REMOVAL ─────────────────────────
+print("\n=== STOP WORD REMOVAL ===")
+print("BEFORE:", df['cleaned'][1][:10])
+df['cleaned'] = df['cleaned'].apply(remove_stopwords)
 print("AFTER: ", df['cleaned'][1][:10])
 
