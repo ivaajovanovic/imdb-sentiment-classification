@@ -6,6 +6,8 @@ from steps.tokenization import tokenize
 #from steps.tokenization_spacy import tokenize
 from steps.punctuation import remove_punctuation
 from steps.stopwords import remove_stopwords
+from steps.lemmatization import lemmatize
+
 
 
 
@@ -58,3 +60,10 @@ print("BEFORE:", df['cleaned'][1][:10])
 df['cleaned'] = df['cleaned'].apply(remove_stopwords)
 print("AFTER: ", df['cleaned'][1][:10])
 
+
+
+# ── LEMMATIZATION ─────────────────────────────
+print("\n=== LEMMATIZATION ===")
+print("BEFORE:", df['cleaned'][1][:10])
+df['cleaned'] = df['cleaned'].apply(lemmatize)
+print("AFTER: ", df['cleaned'][1][:10])
