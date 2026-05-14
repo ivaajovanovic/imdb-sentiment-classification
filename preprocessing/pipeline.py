@@ -5,6 +5,7 @@ from steps.tokenization import tokenize
 from steps.punctuation import remove_punctuation
 from steps.stopwords import remove_stopwords
 from steps.lemmatization import lemmatize
+import os
 
 
 class PreprocessingPipeline:
@@ -45,6 +46,17 @@ if __name__ == "__main__":
 
     pipeline = PreprocessingPipeline()
     df['cleaned'] = df['review'].apply(pipeline.process)
+
+
+    
+
+    # Kreiranje results foldera ako ne postoji
+    os.makedirs("results", exist_ok=True)
+
+    # Cuvanje preprocesiranog dataset-a
+    df.to_pickle("results/preprocessed.pkl")
+
+    print("Preprocessed dataset saved to results/preprocessed.pkl")
 
     print("Original:", df['review'][1][:200])
     print("Cleaned: ", df['cleaned'][1][:10])
