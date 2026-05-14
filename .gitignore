@@ -17,3 +17,6 @@ data/
 Thumbs.db
 
 pipeline_test.py
+
+/results
+/notebooks/results
