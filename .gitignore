@@ -17,3 +17,8 @@ data/
 Thumbs.db
 
 pipeline_test.py
+bow_test.py
+tfidf_test.py
+
+
+results/
