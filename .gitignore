@@ -17,8 +17,11 @@ data/
 Thumbs.db
 
 pipeline_test.py
+
+/results
+/notebooks/results
 bow_test.py
 tfidf_test.py
 
 
-results/
+
