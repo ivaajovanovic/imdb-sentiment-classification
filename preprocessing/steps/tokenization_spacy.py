@@ -1,7 +1,10 @@
 import spacy
+from steps.base import PreprocessingStep
 
-nlp = spacy.load("en_core_web_sm")
+class TokenizationSpacyStep(PreprocessingStep):
+    def __init__(self):
+        self.nlp = spacy.load("en_core_web_sm")
 
-def tokenize(text: str) -> list:
-    doc = nlp(text)
-    return [token.text for token in doc]
+    def run(self, text: str) -> list:
+        doc = self.nlp(text)
+        return [token.text for token in doc]

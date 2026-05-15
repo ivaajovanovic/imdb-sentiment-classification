@@ -2,7 +2,11 @@ from nltk.stem import WordNetLemmatizer
 import nltk
 nltk.download('wordnet', quiet=True)
 
-lemmatizer = WordNetLemmatizer()
+from preprocessing.steps.base import PreprocessingStep
 
-def lemmatize(tokens: list) -> list:
-    return [lemmatizer.lemmatize(token) for token in tokens]
+class LemmatizationStep(PreprocessingStep):
+    def __init__(self):
+        self.lemmatizer = WordNetLemmatizer()
+
+    def run(self, tokens: list) -> list:
+        return [self.lemmatizer.lemmatize(token) for token in tokens]

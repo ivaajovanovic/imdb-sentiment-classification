@@ -1,6 +1,9 @@
 from nltk.corpus import stopwords
+from preprocessing.steps.base import PreprocessingStep
 
-STOP_WORDS = set(stopwords.words('english'))
+class StopwordsRemovalStep(PreprocessingStep):
+    def __init__(self):
+        self.stop_words = set(stopwords.words('english'))
 
-def remove_stopwords(tokens: list) -> list:
-    return [token for token in tokens if token not in STOP_WORDS]
+    def run(self, tokens: list) -> list:
+        return [token for token in tokens if token not in self.stop_words]
