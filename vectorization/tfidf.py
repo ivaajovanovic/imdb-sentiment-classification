@@ -1,21 +1,17 @@
 from sklearn.feature_extraction.text import TfidfVectorizer
+from vectorization.base import BaseVectorizer
 
-import os
-import pickle
-
-def get_tfidf_vectorizer(ngram_range: tuple = (1, 1)):
-    return TfidfVectorizer(ngram_range=ngram_range)
-
-def vectorize(df, vectorizer):
-   
-    texts = df['cleaned'].apply(lambda tokens: ' '.join(tokens))
-
-
-    X = vectorizer.fit_transform(texts)
-
-    # vrednosti su decimalni brojevi (0.0 - 1.0) umesto celih (bow)
-
-    #with open("results/tfidf_vectors.pkl", "wb") as f:
-    #    pickle.dump(X, f)
-
-    return X
+class TfidfVectorizerWrapper(BaseVectorizer):
+    def __init__(self, ngram_range: tuple = (1, 1)):
+        self.vectorizer = TfidfVectorizer(ngram_range=ngram_range)
+    
+    def _prepare_texts(self, df):
+        return df['cleaned'].apply(lambda tokens: ' '.join(tokens))
+    
+    def fit_transform(self, df):
+        texts = self._prepare_texts(df)
+        return self.vectorizer.fit_transform(texts)
+    
+    def transform(self, df):
+        texts = self._prepare_texts(df)
+        return self.vectorizer.transform(texts)
