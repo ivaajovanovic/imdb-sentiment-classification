@@ -2,6 +2,7 @@ import pandas as pd
 import os
 
 from preprocessing.steps.html_removal import HtmlRemovalStep
+from preprocessing.steps.hyphen_removal import HyphenRemovalStep
 from preprocessing.steps.lowercasing import LowercasingStep
 from preprocessing.steps.tokenization import TokenizationStep
 from preprocessing.steps.punctuation import PunctuationRemovalStep
@@ -22,6 +23,7 @@ class PreprocessingPipeline:
 def get_default_pipeline():
     return PreprocessingPipeline(steps=[
         HtmlRemovalStep(),
+        HyphenRemovalStep(),    # ← dodaj ovde
         LowercasingStep(),
         TokenizationStep(),
         PunctuationRemovalStep(),
