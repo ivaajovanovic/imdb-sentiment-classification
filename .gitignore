@@ -27,4 +27,5 @@ tfidf_test.py
 mlruns/
 
 
-
+.tmp.driveupload/
+.tmp.drivedownload/
