@@ -162,25 +162,25 @@ class TfidfAutoencoder(BaseAutoencoder):
         if training:
             self._encoder.train()
             self._decoder.train()
-        else:
-            self._encoder.eval()
-            self._decoder.eval()
-
-        total_loss = 0.0
-        context = torch.enable_grad() if training else torch.no_grad()
-
-        with context:
+            total_loss = 0.0
             for batch in loader:
                 batch = batch.to(self.device)
                 reconstructed = self._decoder(self._encoder(batch))
                 loss = self._criterion(reconstructed, batch)
-
-                if training:
-                    self._optimizer.zero_grad()
-                    loss.backward()
-                    self._optimizer.step()
-
+                self._optimizer.zero_grad()
+                loss.backward()
+                self._optimizer.step()
                 total_loss += loss.item()
+        else:
+            self._encoder.eval()
+            self._decoder.eval()
+            total_loss = 0.0
+            with torch.no_grad():
+                for batch in loader:
+                    batch = batch.to(self.device)
+                    reconstructed = self._decoder(self._encoder(batch))
+                    loss = self._criterion(reconstructed, batch)
+                    total_loss += loss.item()
 
         return total_loss / len(loader)
 
