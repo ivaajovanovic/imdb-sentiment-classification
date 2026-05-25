@@ -3,17 +3,17 @@ import numpy as np
 import scipy.sparse
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 from models.base_autoencoder import BaseAutoencoder
 
 
 class _TfidfDataset(Dataset):
-    """Dataset koji čuva TF-IDF sparse matricu i labele."""
 
     def __init__(self, X_sparse, y=None) -> None:
         self.X = X_sparse
-        self.y = y  # None za unsupervised, array za semi-supervised
+        self.y = y
 
     def __len__(self) -> int:
         return self.X.shape[0]
@@ -29,8 +29,6 @@ class _TfidfDataset(Dataset):
 
 
 class _EncoderNet(nn.Module):
-    """Encoder: input_dim → hidden_dim → latent_dim sa Batch Normalization."""
-
     def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -47,8 +45,6 @@ class _EncoderNet(nn.Module):
 
 
 class _DecoderNet(nn.Module):
-    """Decoder: latent_dim → hidden_dim → input_dim sa Batch Normalization."""
-
     def __init__(self, latent_dim: int, hidden_dim: int, input_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -63,36 +59,20 @@ class _DecoderNet(nn.Module):
         return self.net(x)
 
 
-class _ClassifierHead(nn.Module):
-    """
-    Mali klasifikator na vrhu encodera.
-    latent_dim → 2 klase (negative/positive)
-    """
-
-    def __init__(self, latent_dim: int) -> None:
-        super().__init__()
-        self.net = nn.Linear(latent_dim, 2)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
 class TfidfAutoencoder(BaseAutoencoder):
     """
-    Semi-supervised autoencoder za TF-IDF vektore.
+    Autoencoder sa Supervised Contrastive Loss.
 
     Kombinuje dva lossa:
     - Reconstruction loss (weighted MSE) — uči opšte reprezentacije
-    - Classification loss (CrossEntropy) — gura sentiment klase razdvojeno
+    - Supervised Contrastive loss — gura iste klase bliže, različite dalje
 
-    total_loss = reconstruction_loss + classification_weight * classification_loss
+    total_loss = reconstruction_loss + contrastive_weight * contrastive_loss
 
-    Parametri
-    ---------
-    classification_weight : float
-        Koliko classification loss utiče u odnosu na reconstruction loss.
-        0.0 = čisti unsupervised autoencoder
-        1.0 = podjednako reconstruction i classification
+    Supervised Contrastive loss:
+    - Za svaki primer u batchu, privlači sve primere iste klase
+    - Odbija sve primere različite klase
+    - Direktno optimizuje organizaciju latentnog prostora po sentimentu
     """
 
     def __init__(
@@ -104,7 +84,8 @@ class TfidfAutoencoder(BaseAutoencoder):
         batch_size: int = 64,
         learning_rate: float = 1e-3,
         nonzero_weight: float = 10.0,
-        classification_weight: float = 0.01,
+        contrastive_weight: float = 0.1,
+        temperature: float = 0.07,
         log_every: int = 50,
         device: str | None = None,
     ) -> None:
@@ -115,21 +96,17 @@ class TfidfAutoencoder(BaseAutoencoder):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.nonzero_weight = nonzero_weight
-        self.classification_weight = classification_weight
+        self.contrastive_weight = contrastive_weight
+        self.temperature = temperature  # kontroliše "oštrinu" separacije
         self.log_every = log_every
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self._encoder    = _EncoderNet(input_dim, hidden_dim, latent_dim).to(self.device)
-        self._decoder    = _DecoderNet(latent_dim, hidden_dim, input_dim).to(self.device)
-        self._classifier = _ClassifierHead(latent_dim).to(self.device)
-
-        self._recon_criterion = nn.MSELoss(reduction='none')
-        self._cls_criterion   = nn.CrossEntropyLoss()
+        self._encoder = _EncoderNet(input_dim, hidden_dim, latent_dim).to(self.device)
+        self._decoder = _DecoderNet(latent_dim, hidden_dim, input_dim).to(self.device)
 
         self._optimizer = torch.optim.Adam(
             list(self._encoder.parameters()) +
-            list(self._decoder.parameters()) +
-            list(self._classifier.parameters()),
+            list(self._decoder.parameters()),
             lr=learning_rate,
         )
 
@@ -137,25 +114,15 @@ class TfidfAutoencoder(BaseAutoencoder):
         self._training_time: float = 0.0
 
     def train(self, X_train, X_val, y_train=None, y_val=None) -> dict:
-        """
-        Trenira autoencoder.
-
-        Parametri
-        ---------
-        X_train, X_val : sparse matrix
-            TF-IDF matrice.
-        y_train, y_val : array of int, optional
-            Labele (0=negative, 1=positive). Ako su None — čisti unsupervised.
-        """
         train_loader = self._make_loader(X_train, y_train, shuffle=True)
         val_loader   = self._make_loader(X_val,   y_val,   shuffle=False)
 
         history: dict = {
-            "train_loss":      [],
-            "val_loss":        [],
-            "train_recon":     [],
-            "train_cls":       [],
-            "batch_losses":    [],
+            "train_loss":       [],
+            "val_loss":         [],
+            "train_recon":      [],
+            "train_contrastive":[],
+            "batch_losses":     [],
         }
 
         t0 = time.perf_counter()
@@ -169,15 +136,15 @@ class TfidfAutoencoder(BaseAutoencoder):
             history["train_loss"].append(train_metrics["total"])
             history["val_loss"].append(val_metrics["total"])
             history["train_recon"].append(train_metrics["recon"])
-            history["train_cls"].append(train_metrics["cls"])
+            history["train_contrastive"].append(train_metrics["contrastive"])
             history["batch_losses"].extend(batch_losses)
 
             print(
                 f"Epoch [{epoch + 1:>3}/{self.n_epochs}]  "
-                f"train_loss={train_metrics['total']:.6f}  "
-                f"val_loss={val_metrics['total']:.6f}  "
+                f"train={train_metrics['total']:.6f}  "
+                f"val={val_metrics['total']:.6f}  "
                 f"recon={train_metrics['recon']:.6f}  "
-                f"cls={train_metrics['cls']:.6f}"
+                f"contrastive={train_metrics['contrastive']:.6f}"
             )
 
         self._training_time = time.perf_counter() - t0
@@ -192,10 +159,8 @@ class TfidfAutoencoder(BaseAutoencoder):
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
-                batch = X[start:end]
-                tensor = self._to_tensor(batch)
-                latent = self._encoder(tensor)
-                results.append(latent.cpu().numpy())
+                tensor = self._to_tensor(X[start:end])
+                results.append(self._encoder(tensor).cpu().numpy())
         return np.vstack(results)
 
     def reconstruct(self, X, batch_size: int = 256) -> np.ndarray:
@@ -207,24 +172,23 @@ class TfidfAutoencoder(BaseAutoencoder):
         with torch.no_grad():
             for start in range(0, n, batch_size):
                 end = min(start + batch_size, n)
-                batch = X[start:end]
-                tensor = self._to_tensor(batch)
-                reconstructed = self._decoder(self._encoder(tensor))
-                results.append(reconstructed.cpu().numpy())
+                tensor = self._to_tensor(X[start:end])
+                results.append(self._decoder(self._encoder(tensor)).cpu().numpy())
         return np.vstack(results)
 
     def get_params(self) -> dict:
         return {
-            "input_dim":             self.input_dim,
-            "hidden_dim":            self.hidden_dim,
-            "latent_dim":            self.latent_dim,
-            "n_epochs":              self.n_epochs,
-            "batch_size":            self.batch_size,
-            "learning_rate":         self.learning_rate,
-            "nonzero_weight":        self.nonzero_weight,
-            "classification_weight": self.classification_weight,
-            "log_every":             self.log_every,
-            "device":                self.device,
+            "input_dim":          self.input_dim,
+            "hidden_dim":         self.hidden_dim,
+            "latent_dim":         self.latent_dim,
+            "n_epochs":           self.n_epochs,
+            "batch_size":         self.batch_size,
+            "learning_rate":      self.learning_rate,
+            "nonzero_weight":     self.nonzero_weight,
+            "contrastive_weight": self.contrastive_weight,
+            "temperature":        self.temperature,
+            "log_every":          self.log_every,
+            "device":             self.device,
         }
 
     @property
@@ -235,13 +199,66 @@ class TfidfAutoencoder(BaseAutoencoder):
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _supervised_contrastive_loss(
+        self,
+        features: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Supervised Contrastive Loss.
+
+        Za svaki primer u batchu:
+        - Privlači sve primere iste klase (positives)
+        - Odbija sve primere različite klase (negatives)
+
+        Parametri
+        ---------
+        features : (batch_size, latent_dim)
+            L2-normalizovane latentne reprezentacije.
+        labels : (batch_size,)
+            Labele klasa (0 ili 1).
+
+        Returns
+        -------
+        torch.Tensor
+            Skalarni loss.
+        """
+        # L2 normalizacija — cosine similarity između svih parova
+        features = F.normalize(features, dim=1)
+
+        # Similarity matrica (batch_size x batch_size)
+        sim_matrix = torch.matmul(features, features.T) / self.temperature
+
+        # Maska — koji primeri su iste klase
+        labels = labels.unsqueeze(1)
+        same_class_mask = (labels == labels.T).float()
+
+        # Ukloni dijagonalu (self-similarity)
+        batch_size = features.shape[0]
+        identity = torch.eye(batch_size, device=self.device)
+        same_class_mask = same_class_mask * (1 - identity)
+
+        # Numerički stabilno: oduzmi max pre exp
+        sim_max, _ = sim_matrix.max(dim=1, keepdim=True)
+        sim_matrix = sim_matrix - sim_max.detach()
+
+        exp_sim = torch.exp(sim_matrix) * (1 - identity)
+
+        # Log-sum za svaki primer
+        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+
+        # Prosečan log prob za positive parove
+        n_positives = same_class_mask.sum(dim=1)
+        loss = -(same_class_mask * log_prob).sum(dim=1) / (n_positives + 1e-8)
+
+        return loss.mean()
+
     def _weighted_mse(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         mask    = (target > 0).float()
         weights = 1.0 + (self.nonzero_weight - 1.0) * mask
         return (weights * (output - target) ** 2).mean()
 
     def _make_loader(self, X, y, shuffle: bool) -> DataLoader:
-        # Konvertuj string labele u int ako su stringovi
         if y is not None:
             y_int = np.array([1 if label == 'positive' else 0 for label in y])
         else:
@@ -252,14 +269,19 @@ class TfidfAutoencoder(BaseAutoencoder):
     def _run_epoch(self, loader, training: bool, epoch: int) -> tuple[dict, list]:
         total_loss = 0.0
         total_recon = 0.0
-        total_cls = 0.0
+        total_contrastive = 0.0
         batch_losses = []
 
         if training:
             self._encoder.train()
             self._decoder.train()
-            self._classifier.train()
+        else:
+            self._encoder.eval()
+            self._decoder.eval()
 
+        context = torch.enable_grad() if training else torch.no_grad()
+
+        with context:
             for batch_idx, batch_data in enumerate(loader):
                 if isinstance(batch_data, (list, tuple)):
                     x_batch, y_batch = batch_data
@@ -269,28 +291,27 @@ class TfidfAutoencoder(BaseAutoencoder):
                     y_batch = None
 
                 x_batch = x_batch.to(self.device)
-                latent       = self._encoder(x_batch)
+                latent        = self._encoder(x_batch)
                 reconstructed = self._decoder(latent)
+                recon_loss    = self._weighted_mse(reconstructed, x_batch)
 
-                recon_loss = self._weighted_mse(reconstructed, x_batch)
-
-                if y_batch is not None and self.classification_weight > 0:
-                    logits    = self._classifier(latent)
-                    cls_loss  = self._cls_criterion(logits, y_batch)
-                    loss = recon_loss + self.classification_weight * cls_loss
+                if y_batch is not None and self.contrastive_weight > 0:
+                    cont_loss = self._supervised_contrastive_loss(latent, y_batch)
+                    loss = recon_loss + self.contrastive_weight * cont_loss
                 else:
-                    cls_loss = torch.tensor(0.0)
+                    cont_loss = torch.tensor(0.0)
                     loss = recon_loss
 
-                self._optimizer.zero_grad()
-                loss.backward()
-                self._optimizer.step()
+                if training:
+                    self._optimizer.zero_grad()
+                    loss.backward()
+                    self._optimizer.step()
 
-                total_loss  += loss.item()
-                total_recon += recon_loss.item()
-                total_cls   += cls_loss.item()
+                total_loss        += loss.item()
+                total_recon       += recon_loss.item()
+                total_contrastive += cont_loss.item()
 
-                if batch_idx % self.log_every == 0:
+                if training and batch_idx % self.log_every == 0:
                     batch_losses.append({
                         "epoch": epoch + 1,
                         "batch": batch_idx,
@@ -300,42 +321,12 @@ class TfidfAutoencoder(BaseAutoencoder):
                         f"  Batch {batch_idx:>4}/{len(loader)}  "
                         f"loss={loss.item():.6f}"
                     )
-        else:
-            self._encoder.eval()
-            self._decoder.eval()
-            self._classifier.eval()
-
-            with torch.no_grad():
-                for batch_data in loader:
-                    if isinstance(batch_data, (list, tuple)):
-                        x_batch, y_batch = batch_data
-                        y_batch = y_batch.to(self.device)
-                    else:
-                        x_batch = batch_data
-                        y_batch = None
-
-                    x_batch = x_batch.to(self.device)
-                    latent        = self._encoder(x_batch)
-                    reconstructed = self._decoder(latent)
-                    recon_loss    = self._weighted_mse(reconstructed, x_batch)
-
-                    if y_batch is not None and self.classification_weight > 0:
-                        logits   = self._classifier(latent)
-                        cls_loss = self._cls_criterion(logits, y_batch)
-                        loss = recon_loss + self.classification_weight * cls_loss
-                    else:
-                        cls_loss = torch.tensor(0.0)
-                        loss = recon_loss
-
-                    total_loss  += loss.item()
-                    total_recon += recon_loss.item()
-                    total_cls   += cls_loss.item()
 
         n = len(loader)
         return {
-            "total": total_loss  / n,
-            "recon": total_recon / n,
-            "cls":   total_cls   / n,
+            "total":       total_loss        / n,
+            "recon":       total_recon       / n,
+            "contrastive": total_contrastive / n,
         }, batch_losses
 
     def _to_tensor(self, X) -> torch.Tensor:
