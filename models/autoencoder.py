@@ -104,7 +104,7 @@ class TfidfAutoencoder(BaseAutoencoder):
         batch_size: int = 64,
         learning_rate: float = 1e-3,
         nonzero_weight: float = 10.0,
-        classification_weight: float = 1.0,
+        classification_weight: float = 0.01,
         log_every: int = 50,
         device: str | None = None,
     ) -> None:
