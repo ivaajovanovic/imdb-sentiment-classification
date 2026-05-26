@@ -199,59 +199,36 @@ class TfidfAutoencoder(BaseAutoencoder):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _supervised_contrastive_loss(
-        self,
-        features: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Supervised Contrastive Loss.
+    def _supervised_contrastive_loss(self, features, labels):
+    features = F.normalize(features, dim=1)
+    sim_matrix = torch.matmul(features, features.T) / self.temperature
+    labels = labels.unsqueeze(1)
+    same_class_mask = (labels == labels.T).float()
+    batch_size = features.shape[0]
+    identity = torch.eye(batch_size, device=self.device)
+    same_class_mask = same_class_mask * (1 - identity)
+    sim_max, _ = sim_matrix.max(dim=1, keepdim=True)
+    sim_matrix = sim_matrix - sim_max.detach()
+    exp_sim = torch.exp(sim_matrix) * (1 - identity)
+    log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
+    n_positives = same_class_mask.sum(dim=1)
+    loss = -(same_class_mask * log_prob).sum(dim=1) / (n_positives + 1e-8)
 
-        Za svaki primer u batchu:
-        - Privlači sve primere iste klase (positives)
-        - Odbija sve primere različite klase (negatives)
+    # ← DODAJ OVO
+    if not hasattr(self, '_debug_printed'):
+        self._debug_printed = True
+        print("\n=== CONTRASTIVE LOSS DEBUG ===")
+        print(f"Batch size: {features.shape[0]}")
+        print(f"Labels: {labels.squeeze()[:10]}")
+        print(f"\nSimilarity matrix (first 5x5):")
+        print(sim_matrix[:5, :5].detach().cpu().numpy().round(3))
+        print(f"\nSame class mask (first 5x5):")
+        print(same_class_mask[:5, :5].detach().cpu().numpy())
+        print(f"\nN positives per example: {n_positives[:10].detach().cpu().numpy()}")
+        print(f"Mean n_positives: {n_positives.mean().item():.1f}")
+        print("==============================\n")
 
-        Parametri
-        ---------
-        features : (batch_size, latent_dim)
-            L2-normalizovane latentne reprezentacije.
-        labels : (batch_size,)
-            Labele klasa (0 ili 1).
-
-        Returns
-        -------
-        torch.Tensor
-            Skalarni loss.
-        """
-        # L2 normalizacija — cosine similarity između svih parova
-        features = F.normalize(features, dim=1)
-
-        # Similarity matrica (batch_size x batch_size)
-        sim_matrix = torch.matmul(features, features.T) / self.temperature
-
-        # Maska — koji primeri su iste klase
-        labels = labels.unsqueeze(1)
-        same_class_mask = (labels == labels.T).float()
-
-        # Ukloni dijagonalu (self-similarity)
-        batch_size = features.shape[0]
-        identity = torch.eye(batch_size, device=self.device)
-        same_class_mask = same_class_mask * (1 - identity)
-
-        # Numerički stabilno: oduzmi max pre exp
-        sim_max, _ = sim_matrix.max(dim=1, keepdim=True)
-        sim_matrix = sim_matrix - sim_max.detach()
-
-        exp_sim = torch.exp(sim_matrix) * (1 - identity)
-
-        # Log-sum za svaki primer
-        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True) + 1e-8)
-
-        # Prosečan log prob za positive parove
-        n_positives = same_class_mask.sum(dim=1)
-        loss = -(same_class_mask * log_prob).sum(dim=1) / (n_positives + 1e-8)
-
-        return loss.mean()
+    return loss.mean()
 
     def _weighted_mse(self, output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         mask    = (target > 0).float()
