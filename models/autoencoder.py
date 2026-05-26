@@ -12,33 +12,25 @@ from models.base_autoencoder import BaseAutoencoder
 class _TfidfAugment:
     """
     Augmentacija TF-IDF vektora za SupContrast.
-
-    Kreira dva različita "pogleda" iste recenzije:
-    - View 1: random dropout nenultih featuredova (feature_drop_rate)
-    - View 2: isti dropout ali sa drugačijim random seed-om
-
-    Ovo simulira da su neke reči "izostavljene" iz recenzije —
-    isti sentiment, drugačiji podskup reči.
+    Dropout-uje feature_drop_rate nenultih featuredova —
+    simulira da su neke reči izostavljene iz recenzije.
     """
 
     def __init__(self, feature_drop_rate: float = 0.1) -> None:
         self.feature_drop_rate = feature_drop_rate
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        """Primeni dropout samo na nenulte pozicije."""
         if self.feature_drop_rate == 0.0:
             return x
         mask = (x > 0).float()
-        drop = torch.bernoulli(
-            torch.full_like(x, 1.0 - self.feature_drop_rate)
-        )
+        drop = torch.bernoulli(torch.full_like(x, 1.0 - self.feature_drop_rate))
         return x * mask * drop
 
 
 class _TfidfDataset(Dataset):
     """
-    Dataset koji vraća (view1, view2, label) za SupContrast treniranje,
-    ili samo (x, label) za val/test.
+    Dataset koji vraća (view1, view2, original, label) za train,
+    ili (x, label) za val/test.
     """
 
     def __init__(self, X_sparse, y=None, augment: bool = False,
@@ -58,7 +50,6 @@ class _TfidfDataset(Dataset):
         x = torch.FloatTensor(row)
 
         if self.augment:
-            # Dva različita augmentovana pogleda iste recenzije
             view1 = self.aug(x.clone())
             view2 = self.aug(x.clone())
             if self.y is not None:
@@ -71,8 +62,6 @@ class _TfidfDataset(Dataset):
 
 
 class _EncoderNet(nn.Module):
-    """Encoder: input_dim → hidden_dim → latent_dim sa Batch Normalization."""
-
     def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -89,8 +78,6 @@ class _EncoderNet(nn.Module):
 
 
 class _DecoderNet(nn.Module):
-    """Decoder: latent_dim → hidden_dim → input_dim sa Batch Normalization."""
-
     def __init__(self, latent_dim: int, hidden_dim: int, input_dim: int) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -114,6 +101,8 @@ class TfidfAutoencoder(BaseAutoencoder):
     kao u originalnom SupContrast paperu.
 
     total_loss = reconstruction_loss + contrastive_weight * contrastive_loss
+
+    Val loader TAKODJE koristi augmentacije da bi val loss bio uporediv sa train lossom.
     """
 
     def __init__(
@@ -140,7 +129,7 @@ class TfidfAutoencoder(BaseAutoencoder):
         self.nonzero_weight = nonzero_weight
         self.contrastive_weight = contrastive_weight
         self.temperature = temperature
-        self.feature_drop_rate = feature_drop_rate  # koliko featuredova dropout-ujemo
+        self.feature_drop_rate = feature_drop_rate
         self.log_every = log_every
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -157,9 +146,9 @@ class TfidfAutoencoder(BaseAutoencoder):
         self._training_time: float = 0.0
 
     def train(self, X_train, X_val, y_train=None, y_val=None) -> dict:
-        # Train loader sa augmentacijom, val loader bez
-        train_loader = self._make_loader(X_train, y_train, shuffle=True, augment=True)
-        val_loader   = self._make_loader(X_val,   y_val,   shuffle=False, augment=False)
+        # I train I val loader imaju augmentacije — poređenje je fer
+        train_loader = self._make_loader(X_train, y_train, shuffle=True,  augment=True)
+        val_loader   = self._make_loader(X_val,   y_val,   shuffle=False, augment=True)
 
         history: dict = {
             "train_loss":        [],
@@ -252,28 +241,16 @@ class TfidfAutoencoder(BaseAutoencoder):
         """
         Supervised Contrastive Loss — SupContrast stil.
 
-        Parametri
-        ---------
         features : (bsz, n_views, latent_dim)
-            Latentne reprezentacije za svaki pogled.
-            n_views=2: [view1_encodings, view2_encodings]
-        labels : (bsz,)
-            Labele klasa (0 ili 1).
-
-        Returns
-        -------
-        torch.Tensor
-            Skalarni loss.
+        labels   : (bsz,)
         """
         bsz, n_views, dim = features.shape
 
         # Spoji sve poglede: (bsz * n_views, dim)
-        # Redosled: [r1_v1, r1_v2, r2_v1, r2_v2, ...]
         features_flat = features.reshape(bsz * n_views, dim)
         features_flat = F.normalize(features_flat, dim=1)
 
-        # Prošireni labels: svaki label se ponavlja n_views puta
-        # [l1, l1, l2, l2, l3, l3, ...]
+        # Prošireni labels: [l1, l1, l2, l2, ...]
         labels_exp = labels.repeat_interleave(n_views)
 
         # Similarity matrica (bsz*n_views x bsz*n_views)
@@ -310,11 +287,8 @@ class TfidfAutoencoder(BaseAutoencoder):
             y_int = np.array([1 if label == 'positive' else 0 for label in y])
         else:
             y_int = None
-        dataset = _TfidfDataset(
-            X, y_int,
-            augment=augment,
-            feature_drop_rate=self.feature_drop_rate,
-        )
+        dataset = _TfidfDataset(X, y_int, augment=augment,
+                                feature_drop_rate=self.feature_drop_rate)
         return DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
 
     def _run_epoch(self, loader, training: bool, epoch: int) -> tuple[dict, list]:
@@ -335,56 +309,40 @@ class TfidfAutoencoder(BaseAutoencoder):
         with context:
             for batch_idx, batch_data in enumerate(loader):
 
+                # I train i val primaju augmentovani batch: (view1, view2, original, label)
+                if len(batch_data) == 4:
+                    view1, view2, x_orig, y_batch = batch_data
+                    y_batch = y_batch.to(self.device)
+                else:
+                    view1, view2, x_orig = batch_data
+                    y_batch = None
+
+                view1  = view1.to(self.device)
+                view2  = view2.to(self.device)
+                x_orig = x_orig.to(self.device)
+
+                # Enkoduj oba pogleda
+                z1 = self._encoder(view1)
+                z2 = self._encoder(view2)
+
+                # Reconstruction na originalnom x
+                z_orig        = self._encoder(x_orig)
+                reconstructed = self._decoder(z_orig)
+                recon_loss    = self._weighted_mse(reconstructed, x_orig)
+
+                # Contrastive loss sa oba pogleda: (bsz, 2, latent_dim)
+                if y_batch is not None and self.contrastive_weight > 0:
+                    features  = torch.stack([z1, z2], dim=1)
+                    cont_loss = self._supervised_contrastive_loss(features, y_batch)
+                    loss      = recon_loss + self.contrastive_weight * cont_loss
+                else:
+                    cont_loss = torch.tensor(0.0)
+                    loss      = recon_loss
+
                 if training:
-                    # Augmentovani batch: (view1, view2, original, labels) ili (view1, view2, original)
-                    if len(batch_data) == 4:
-                        view1, view2, x_orig, y_batch = batch_data
-                        y_batch = y_batch.to(self.device)
-                    else:
-                        view1, view2, x_orig = batch_data
-                        y_batch = None
-
-                    view1  = view1.to(self.device)
-                    view2  = view2.to(self.device)
-                    x_orig = x_orig.to(self.device)
-
-                    # Enkoduj oba pogleda
-                    z1 = self._encoder(view1)  # (bsz, latent_dim)
-                    z2 = self._encoder(view2)  # (bsz, latent_dim)
-
-                    # Reconstruction na originalnom x (ne augmentovanom)
-                    z_orig        = self._encoder(x_orig)
-                    reconstructed = self._decoder(z_orig)
-                    recon_loss    = self._weighted_mse(reconstructed, x_orig)
-
-                    # Contrastive loss sa oba pogleda: (bsz, 2, latent_dim)
-                    if y_batch is not None and self.contrastive_weight > 0:
-                        features = torch.stack([z1, z2], dim=1)
-                        cont_loss = self._supervised_contrastive_loss(features, y_batch)
-                        loss = recon_loss + self.contrastive_weight * cont_loss
-                    else:
-                        cont_loss = torch.tensor(0.0)
-                        loss = recon_loss
-
                     self._optimizer.zero_grad()
                     loss.backward()
                     self._optimizer.step()
-
-                else:
-                    # Val batch: (x, labels) ili samo x
-                    if isinstance(batch_data, (list, tuple)) and len(batch_data) == 2:
-                        x_batch, y_batch = batch_data
-                        y_batch = y_batch.to(self.device)
-                    else:
-                        x_batch = batch_data
-                        y_batch = None
-
-                    x_batch       = x_batch.to(self.device)
-                    z             = self._encoder(x_batch)
-                    reconstructed = self._decoder(z)
-                    recon_loss    = self._weighted_mse(reconstructed, x_batch)
-                    cont_loss     = torch.tensor(0.0)
-                    loss          = recon_loss
 
                 total_loss        += loss.item()
                 total_recon       += recon_loss.item()
